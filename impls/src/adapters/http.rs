@@ -31,8 +31,11 @@ pub struct HttpSlateSender {
 impl HttpSlateSender {
 	/// Create a direct HTTP/HTTPS slate sender, returning Err if scheme is not "http" or "https"
 	pub fn new(base_url: &str, request_timeout: Duration) -> Result<HttpSlateSender, Error> {
-		if !base_url.starts_with("http") && !base_url.starts_with("https") {
-			Err(Error::GenericError("Scheme must be http".to_string()))
+		let scheme = base_url.split_once("://").map(|(s, _)| s);
+		if !matches!(scheme, Some("http") | Some("https")) {
+			Err(Error::GenericError(
+				"Scheme must be http or https".to_string(),
+			))
 		} else {
 			Ok(HttpSlateSender {
 				base_url: base_url.to_owned(),
@@ -286,6 +289,22 @@ mod tests {
 
 	fn sender(url: &str) -> HttpSlateSender {
 		HttpSlateSender::new(url, Duration::from_secs(5)).unwrap()
+	}
+
+	#[test]
+	fn new_accepts_only_http_and_https_schemes() {
+		let t = Duration::from_secs(1);
+		assert!(HttpSlateSender::new("http://127.0.0.1:3415", t).is_ok());
+		assert!(HttpSlateSender::new("https://example.com", t).is_ok());
+		for bad in ["httpx://h", "http-anything", "ftp://h", "h", "", "://h"] {
+			assert!(HttpSlateSender::new(bad, t).is_err(), "{bad}");
+		}
+		assert!(HttpSlateSender::with_socks_proxy(
+			"httpx://h",
+			"127.0.0.1:9050".parse().unwrap(),
+			t
+		)
+		.is_err());
 	}
 
 	#[test]
