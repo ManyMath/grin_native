@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::client_utils::{Client, ClientError};
-use crate::libwallet::slate_versions::{SlateVersion, VersionedSlate};
+use crate::adapters::http::HttpSlateSender;
+use crate::client_utils::ClientError;
+use crate::libwallet::slate_versions::SlateVersion;
 use crate::libwallet::{Error, Slate};
 use crate::tor::arti::{start_tor_client, tor_post};
 use crate::tor::bridge::TorBridge;
@@ -23,7 +24,6 @@ use crate::tor::proxy::TorProxy;
 use crate::SlateSender;
 use grin_wallet_config::TorConfig;
 use serde::Serialize;
-use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::net::SocketAddr;
@@ -114,61 +114,12 @@ impl TorSlateSender {
 
 	/// Check version of the listening wallet
 	pub fn check_other_version(&mut self, url: &str) -> Result<SlateVersion, Error> {
-		let req = json!({
-			"jsonrpc": "2.0",
-			"method": "check_version",
-			"id": 1,
-			"params": []
-		});
-
-		let res: String = self.post(url, req).map_err(|e| {
-			let mut report = format!("Performing version check (is recipient listening?): {}", e);
-			let err_string = format!("{}", e);
-			if !self.config.use_integrated.unwrap_or(false) && err_string.contains("404") {
-				// Report that the other version of the wallet is out of date
-				report = "Other wallet is incompatible and requires an upgrade. \
-				          Please urge the other wallet owner to upgrade and try the transaction again."
-					.to_string();
-				error!("{}", report);
-			}
-			Error::ClientCallback(report)
-		})?;
-
-		let res: Value = serde_json::from_str(&res)
-			.map_err(|_| Error::ClientCallback(format!("Can not parse response {:?}", res)))?;
-		trace!("Response: {}", res);
-		if res["error"] != json!(null) {
-			let report = format!(
-				"Posting transaction slate: Error: {}, Message: {}",
-				res["error"]["code"], res["error"]["message"]
-			);
-			error!("{}", report);
-			return Err(Error::ClientCallback(report));
-		}
-
-		let resp_value = res["result"]["Ok"].clone();
-		trace!("resp_value: {}", resp_value.clone());
-		let foreign_api_version: u16 =
-			serde_json::from_value(resp_value["foreign_api_version"].clone())
-				.map_err(|_| Error::ClientCallback(format!("Can not parse response {:?}", res)))?;
-		let supported_slate_versions: Vec<String> =
-			serde_json::from_value(resp_value["supported_slate_versions"].clone())
-				.map_err(|_| Error::ClientCallback(format!("Can not parse response {:?}", res)))?;
-
-		// trivial tests for now, but will be expanded later
-		if foreign_api_version < 2 {
-			let report = "Other wallet reports unrecognized API format.".to_string();
-			error!("{}", report);
-			return Err(Error::ClientCallback(report));
-		}
-
-		if supported_slate_versions.contains(&"V4".to_owned()) {
-			return Ok(SlateVersion::V4);
-		}
-
-		let report = "Unable to negotiate slate format with other wallet.".to_string();
-		error!("{}", report);
-		Err(Error::ClientCallback(report))
+		let http = HttpSlateSender::new(&self.base_url, self.config.request_timeout())?;
+		http.check_other_version_with(
+			url,
+			!self.config.use_integrated.unwrap_or(false),
+			|u, req| self.post(u, req),
+		)
 	}
 
 	fn post<IN>(&self, url: &str, input: IN) -> Result<String, ClientError>
@@ -181,11 +132,9 @@ impl TorSlateSender {
 					ClientError::Internal("Socks proxy address is not set".to_string())
 				})?);
 			let timeout = self.config.request_timeout();
-			let client = Client::with_proxy(socks_proxy_addr, "socks5h://", timeout)
+			let http = HttpSlateSender::with_socks_proxy(&self.base_url, socks_proxy_addr, timeout)
 				.map_err(|_| ClientError::Internal("Unable to create http client".into()))?;
-			let req = client.create_post_request(url, None, &input)?;
-			let res = client.send_request(req)?;
-			res
+			http.post(url, input)?
 		} else {
 			tor_post(&self.config, &input, url)
 				.map_err(|e| ClientError::RequestError(format!("{:?}", e)))?
@@ -196,71 +145,12 @@ impl TorSlateSender {
 
 impl SlateSender for TorSlateSender {
 	fn send_tx(&mut self, slate: &Slate, finalize: bool) -> Result<Slate, Error> {
-		let trailing = match self.base_url.ends_with('/') {
-			true => "",
-			false => "/",
-		};
-		let url_str = format!("{}{}v2/foreign", self.base_url, trailing);
-
-		let slate_send = match self.check_other_version(&url_str)? {
-			SlateVersion::V4 => VersionedSlate::into_version(slate.clone(), SlateVersion::V4)?,
-		};
-		// Note: not using easy-jsonrpc as don't want the dependencies in this crate
-		let req = match finalize {
-			false => json!({
-				"jsonrpc": "2.0",
-				"method": "receive_tx",
-				"id": 1,
-				"params": [
-							slate_send,
-							null,
-							null
-						]
-			}),
-			true => json!({
-				"jsonrpc": "2.0",
-				"method": "finalize_tx",
-				"id": 1,
-				"params": [
-							slate_send
-						]
-			}),
-		};
-
-		trace!("Sending receive_tx request: {}", req);
-
-		let res: String = self.post(&url_str, req).map_err(|e| {
-			let report = format!(
-				"Sending transaction slate to other wallet (is recipient listening?): {}",
-				e
-			);
-			Error::ClientCallback(report)
-		})?;
-
-		let res: Value = serde_json::from_str(&res)
-			.map_err(|_| Error::ClientCallback(format!("Can not parse response {:?}", res)))?;
-		trace!("Response: {}", res);
-		if res["error"] != json!(null) {
-			let report = format!(
-				"Posting transaction slate: Error: {}, Message: {}",
-				res["error"]["code"], res["error"]["message"]
-			);
-			error!("{}", report);
-			return Err(Error::ClientCallback(report));
-		}
-
-		let slate_value = res["result"]["Ok"].clone();
-
-		trace!("slate_value: {}", slate_value);
-		if let Ok(slate_value) = serde_json::to_string(&slate_value) {
-			let slate = Slate::deserialize_upgrade(&slate_value).map_err(|e| {
-				error!("Error deserializing response slate: {}", e);
-				Error::SlateDeser
-			})?;
-			Ok(slate)
-		} else {
-			error!("Error deserializing response slate: {}", slate_value);
-			Err(Error::SlateDeser)
-		}
+		let http = HttpSlateSender::new(&self.base_url, self.config.request_timeout())?;
+		http.send_tx_with(
+			slate,
+			finalize,
+			!self.config.use_integrated.unwrap_or(false),
+			|u, req| self.post(u, req),
+		)
 	}
 }

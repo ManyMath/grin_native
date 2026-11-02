@@ -13,11 +13,15 @@
 // limitations under the License.
 
 mod file;
+mod http;
 mod slatepack;
+#[cfg(feature = "tor")]
 pub mod tor;
 
 pub use self::file::PathToSlate;
+pub use self::http::HttpSlateSender;
 pub use self::slatepack::PathToSlatepack;
+#[cfg(feature = "tor")]
 pub use self::tor::TorSlateSender;
 
 use crate::config::WalletConfig;

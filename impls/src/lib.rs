@@ -33,17 +33,25 @@ use grin_wallet_libwallet as libwallet;
 
 use grin_wallet_config as config;
 
+#[cfg(not(any(feature = "rustls", feature = "native-tls")))]
+compile_error!(
+	"grin_wallet_impls needs a TLS backend: enable the `rustls` or `native-tls` feature"
+);
+
 mod adapters;
 mod client_utils;
 mod error;
 mod lifecycle;
 mod node_clients;
 pub mod test_framework;
+#[cfg(feature = "tor")]
 pub mod tor;
 
+#[cfg(feature = "tor")]
+pub use crate::adapters::TorSlateSender;
 pub use crate::adapters::{
-	PathToSlate, PathToSlatepack, SlateGetter, SlatePutter, SlateReceiver, SlateSender,
-	TorSlateSender,
+	HttpSlateSender, PathToSlate, PathToSlatepack, SlateGetter, SlatePutter, SlateReceiver,
+	SlateSender,
 };
 pub use crate::error::Error;
 pub use crate::lifecycle::DefaultLCProvider;

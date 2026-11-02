@@ -64,15 +64,40 @@ impl Client {
 		Self::build(Some((socks_proxy_addr, scheme)), request_timeout)
 	}
 
+	// reqwest's rustls-no-provider feature still links rustls-platform-verifier, but
+	// handing it a built ClientConfig means the platform verifier is never constructed.
+	// That matters on Android, where the verifier needs JNI setup we can't do from an FFI
+	// library. Keep tls_backend_preconfigured here.
+	#[allow(unused_mut)]
+	fn configure_tls(mut builder: ClientBuilder) -> Result<ClientBuilder, Error> {
+		#[cfg(all(feature = "rustls", not(feature = "native-tls")))]
+		{
+			let mut root_store = rustls::RootCertStore::empty();
+			root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+			let mut tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(
+				rustls::crypto::ring::default_provider(),
+			))
+			.with_safe_default_protocol_versions()
+			.map_err(|e| Error::Internal(format!("Unable to configure TLS: {}", e)))?
+			.with_root_certificates(root_store)
+			.with_no_client_auth();
+			tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+			builder = builder.tls_backend_preconfigured(tls_config);
+		}
+		Ok(builder)
+	}
+
 	fn build(proxy: Option<(SocketAddr, &str)>, request_timeout: Duration) -> Result<Self, Error> {
 		let mut headers = HeaderMap::new();
 		headers.insert(USER_AGENT, HeaderValue::from_static("grin-client"));
 		headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
 		headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-		let mut builder = ClientBuilder::new()
-			.timeout(request_timeout)
-			.default_headers(headers);
+		let mut builder = Self::configure_tls(
+			ClientBuilder::new()
+				.timeout(request_timeout)
+				.default_headers(headers),
+		)?;
 
 		if let Some(p) = proxy {
 			let (addr, scheme) = p;
@@ -271,9 +296,15 @@ impl Client {
 		if Handle::try_current().is_ok() {
 			let rt = RUNTIME.clone();
 			let client = self.clone();
-			std::thread::spawn(move || rt.block_on(async { client.send_request_async(req).await }))
-				.join()
-				.unwrap()
+			let chain_type = crate::core::global::CHAIN_TYPE.with(|c| c.get());
+			std::thread::spawn(move || {
+				if let Some(ct) = chain_type {
+					crate::core::global::set_local_chain_type(ct);
+				}
+				rt.block_on(async { client.send_request_async(req).await })
+			})
+			.join()
+			.unwrap()
 		} else {
 			RUNTIME.block_on(self.send_request_async(req))
 		}
@@ -289,11 +320,14 @@ mod tests {
 	#[tokio::test]
 	async fn http_status() {
 		let client = Client {
-			client: ClientBuilder::new()
-				.no_proxy()
-				.timeout(Duration::from_secs(5))
-				.build()
-				.unwrap(),
+			client: Client::configure_tls(
+				ClientBuilder::new()
+					.no_proxy()
+					.timeout(Duration::from_secs(5)),
+			)
+			.unwrap()
+			.build()
+			.unwrap(),
 		};
 		for (status, body, expected) in [
 			("200 OK", "{}", Ok(serde_json::json!({}))),

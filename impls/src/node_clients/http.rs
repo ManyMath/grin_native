@@ -276,10 +276,15 @@ impl NodeClient for HTTPNodeClient {
 		};
 
 		let rt = RUNTIME.clone();
-		let res: Result<Vec<_>, _> =
-			std::thread::spawn(move || rt.block_on(async move { task.await }))
-				.join()
-				.unwrap();
+		let chain_type = crate::core::global::CHAIN_TYPE.with(|c| c.get());
+		let res: Result<Vec<_>, _> = std::thread::spawn(move || {
+			if let Some(ct) = chain_type {
+				crate::core::global::set_local_chain_type(ct);
+			}
+			rt.block_on(async move { task.await })
+		})
+		.join()
+		.unwrap();
 
 		let results: Vec<OutputPrintable> = match res {
 			Ok(resps) => {
