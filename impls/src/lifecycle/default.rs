@@ -255,6 +255,21 @@ where
 			.map_err(|_| Error::Lifecycle("Error deriving keychain".to_owned()))?;
 
 		let mask = wallet.set_keychain(keychain, create_mask, use_test_rng)?;
+		// Bring transaction contexts stored by older versions up to the
+		// current storage layout. A failure here leaves the old records
+		// readable, so it does not stop the wallet from opening.
+		let upgraded = wallet.batch(mask.as_ref()).and_then(|mut batch| {
+			let n = batch.upgrade_private_contexts()?;
+			if n > 0 {
+				batch.commit()?;
+			}
+			Ok(n)
+		});
+		match upgraded {
+			Ok(0) => {}
+			Ok(n) => info!("Upgraded {} stored transaction contexts", n),
+			Err(e) => warn!("Could not upgrade stored transaction contexts: {}", e),
+		}
 		self.backend = Some(wallet);
 		Ok(mask)
 	}

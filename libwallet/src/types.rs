@@ -362,6 +362,12 @@ impl fmt::Display for OutputStatus {
 /// Verified against `max_tx_weight()` below.
 const MAX_CONTEXT_SIZE: usize = 4 * 1024 * 1024;
 
+/// Current layout of the secret fields in a stored [`Context`].
+///
+/// 0: only `sec_key` and `sec_nonce` are masked.
+/// 1: `initial_sec_key` and `initial_sec_nonce` are masked as well.
+pub const CONTEXT_STORAGE_VERSION: u8 = 1;
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 /// Holds the context for a single aggsig transaction
 pub struct Context {
@@ -395,6 +401,10 @@ pub struct Context {
 	/// for invoice I2 Only, store the tx excess so we can
 	/// remove it from the slate on return
 	pub calculated_excess: Option<pedersen::Commitment>,
+	/// Layout of the secret fields in the stored record. Records written
+	/// before this field existed read as 0.
+	#[serde(default)]
+	pub storage_version: u8,
 }
 
 impl Context {
@@ -444,6 +454,7 @@ impl Context {
 			payment_proof_derivation_index: None,
 			late_lock_args: None,
 			calculated_excess: None,
+			storage_version: CONTEXT_STORAGE_VERSION,
 		}
 	}
 }

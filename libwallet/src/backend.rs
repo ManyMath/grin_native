@@ -20,6 +20,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 use crate::blake2::blake2b::{Blake2b, Blake2bResult};
+use crate::types::CONTEXT_STORAGE_VERSION;
 
 use crate::{
 	AcctPathMapping, Context, Error, NodeClient, OutputData, ScannedBlockInfo, TxLogEntry,
@@ -62,37 +63,57 @@ const DB_PREFIXES: [u8; 9] = [
 	WALLET_INIT_STATUS,
 ];
 
+/// XOR masks for the secret fields of a stored private transaction context.
+struct PrivateCtxMasks {
+	blind: [u8; SECRET_KEY_SIZE],
+	nonce: [u8; SECRET_KEY_SIZE],
+	initial_blind: [u8; SECRET_KEY_SIZE],
+	initial_nonce: [u8; SECRET_KEY_SIZE],
+}
+
+impl PrivateCtxMasks {
+	/// Masks or unmasks (XOR is its own inverse) the secret fields of `ctx`
+	/// that are masked in records of the given storage version.
+	fn apply(&self, ctx: &mut Context, storage_version: u8) {
+		for i in 0..SECRET_KEY_SIZE {
+			ctx.sec_key.0[i] ^= self.blind[i];
+			ctx.sec_nonce.0[i] ^= self.nonce[i];
+		}
+		if storage_version >= 1 {
+			for i in 0..SECRET_KEY_SIZE {
+				ctx.initial_sec_key.0[i] ^= self.initial_blind[i];
+				ctx.initial_sec_nonce.0[i] ^= self.initial_nonce[i];
+			}
+		}
+	}
+}
+
+/// h(root_key|slate_id|label), truncated to a secret key's length.
+fn private_ctx_mask(root_key: &SecretKey, slate_id: &[u8], label: &[u8]) -> [u8; SECRET_KEY_SIZE] {
+	let mut hasher = Blake2b::new(SECRET_KEY_SIZE);
+	hasher.update(&root_key.0[..]);
+	hasher.update(&slate_id[..]);
+	hasher.update(label);
+	let hash = hasher.finalize();
+	let mut ret = [0; SECRET_KEY_SIZE];
+	ret.copy_from_slice(&hash.as_bytes()[0..SECRET_KEY_SIZE]);
+	ret
+}
+
 /// Helper to derive XOR keys for storing private transaction keys in the DB
-/// (blind_xor_key, nonce_xor_key)
-fn private_ctx_xor_keys<K>(
-	keychain: &K,
-	slate_id: &[u8],
-) -> Result<([u8; SECRET_KEY_SIZE], [u8; SECRET_KEY_SIZE]), Error>
+fn private_ctx_xor_keys<K>(keychain: &K, slate_id: &[u8]) -> Result<PrivateCtxMasks, Error>
 where
 	K: Keychain,
 {
 	let root_key = keychain.derive_key(0, &K::root_key_id(), SwitchCommitmentType::Regular)?;
-
-	// derive XOR values for storing secret values in DB
-	// h(root_key|slate_id|"blind")
-	let mut hasher = Blake2b::new(SECRET_KEY_SIZE);
-	hasher.update(&root_key.0[..]);
-	hasher.update(&slate_id[..]);
-	hasher.update(&b"blind"[..]);
-	let blind_xor_key = hasher.finalize();
-	let mut ret_blind = [0; SECRET_KEY_SIZE];
-	ret_blind.copy_from_slice(&blind_xor_key.as_bytes()[0..SECRET_KEY_SIZE]);
-
-	// h(root_key|slate_id|"nonce")
-	let mut hasher = Blake2b::new(SECRET_KEY_SIZE);
-	hasher.update(&root_key.0[..]);
-	hasher.update(&slate_id[..]);
-	hasher.update(&b"nonce"[..]);
-	let nonce_xor_key = hasher.finalize();
-	let mut ret_nonce = [0; SECRET_KEY_SIZE];
-	ret_nonce.copy_from_slice(&nonce_xor_key.as_bytes()[0..SECRET_KEY_SIZE]);
-
-	Ok((ret_blind, ret_nonce))
+	// "blind" and "nonce" are the labels used since the first version of this
+	// format and must not change, or existing records stop decoding.
+	Ok(PrivateCtxMasks {
+		blind: private_ctx_mask(&root_key, slate_id, b"blind"),
+		nonce: private_ctx_mask(&root_key, slate_id, b"nonce"),
+		initial_blind: private_ctx_mask(&root_key, slate_id, b"initial_blind"),
+		initial_nonce: private_ctx_mask(&root_key, slate_id, b"initial_nonce"),
+	})
 }
 
 /// Wallet backend. All functions here expect that the wallet instance
@@ -356,8 +377,7 @@ where
 		slate_id: &[u8],
 	) -> Result<Context, Error> {
 		let ctx_key = to_key_u64(slate_id, 0);
-		let (blind_xor_key, nonce_xor_key) =
-			private_ctx_xor_keys(&self.keychain(keychain_mask)?, slate_id)?;
+		let masks = private_ctx_xor_keys(&self.keychain(keychain_mask)?, slate_id)?;
 
 		let mut ctx: Context = option_to_not_found(
 			self.db
@@ -365,10 +385,9 @@ where
 			|| format!("Slate id: {:x?}", slate_id.to_vec()),
 		)?;
 
-		for i in 0..SECRET_KEY_SIZE {
-			ctx.sec_key.0[i] ^= blind_xor_key[i];
-			ctx.sec_nonce.0[i] ^= nonce_xor_key[i];
-		}
+		let stored_version = ctx.storage_version;
+		masks.apply(&mut ctx, stored_version);
+		ctx.storage_version = CONTEXT_STORAGE_VERSION;
 
 		Ok(ctx)
 	}
@@ -728,17 +747,55 @@ where
 	/// Save the private context associated with a slate id.
 	pub fn save_private_context(&mut self, slate_id: &[u8], ctx: &Context) -> Result<(), Error> {
 		let ctx_key = to_key_u64(slate_id, 0);
-		let (blind_xor_key, nonce_xor_key) = private_ctx_xor_keys(self.keychain(), slate_id)?;
+		let masks = private_ctx_xor_keys(self.keychain(), slate_id)?;
 
 		let mut s_ctx = ctx.clone();
-		for i in 0..SECRET_KEY_SIZE {
-			s_ctx.sec_key.0[i] ^= blind_xor_key[i];
-			s_ctx.sec_nonce.0[i] ^= nonce_xor_key[i];
-		}
+		s_ctx.storage_version = CONTEXT_STORAGE_VERSION;
+		masks.apply(&mut s_ctx, CONTEXT_STORAGE_VERSION);
 
 		self.db
 			.put_ser(Some(PRIVATE_TX_CONTEXT_PREFIX), &ctx_key, &s_ctx)?;
 		Ok(())
+	}
+
+	/// Rewrites stored private contexts written in an older layout so that
+	/// every secret field is masked. Returns how many records were rewritten.
+	///
+	/// Rewriting a record does not erase the old bytes from free database
+	/// pages or from copies of the database made before the rewrite.
+	pub fn upgrade_private_contexts(&mut self) -> Result<usize, Error> {
+		let protocol_version = self.db.protocol_version();
+		let legacy: Vec<(Vec<u8>, Context)> = self
+			.db
+			.iter(Some(PRIVATE_TX_CONTEXT_PREFIX), move |k, mut v| {
+				let ctx: Context = ser::deserialize(
+					&mut v,
+					protocol_version,
+					ser::DeserializationMode::default(),
+				)?;
+				Ok((k.to_vec(), ctx))
+			})?
+			.collect::<Result<Vec<_>, _>>()?
+			.into_iter()
+			.filter(|(_, ctx)| ctx.storage_version < CONTEXT_STORAGE_VERSION)
+			.collect();
+		let mut count = 0;
+		for (key, mut ctx) in legacy {
+			// Keys are the slate id followed by a u64 participant id.
+			if key.len() < 8 {
+				continue;
+			}
+			let slate_id = &key[..key.len() - 8];
+			let masks = private_ctx_xor_keys(self.keychain(), slate_id)?;
+			let stored_version = ctx.storage_version;
+			masks.apply(&mut ctx, stored_version);
+			ctx.storage_version = CONTEXT_STORAGE_VERSION;
+			masks.apply(&mut ctx, CONTEXT_STORAGE_VERSION);
+			self.db
+				.put_ser(Some(PRIVATE_TX_CONTEXT_PREFIX), &key, &ctx)?;
+			count += 1;
+		}
+		Ok(count)
 	}
 
 	/// Delete the private context associated with the slate id.
@@ -761,4 +818,222 @@ fn to_key_u64<K: AsRef<[u8]>>(k: K, val: u64) -> Vec<u8> {
 	let mut res = k.as_ref().to_vec();
 	res.write_u64::<BigEndian>(val).unwrap();
 	res
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use grin_core::core::TxKernel;
+	use grin_util::secp::pedersen;
+	use std::collections::HashMap;
+
+	#[derive(Clone)]
+	struct NoNode;
+
+	impl NodeClient for NoNode {
+		fn node_url(&self) -> &str {
+			""
+		}
+		fn set_node_url(&mut self, _node_url: &str) {}
+		fn node_api_secret(&self) -> Option<String> {
+			None
+		}
+		fn set_node_api_secret(&mut self, _node_api_secret: Option<String>) {}
+		fn post_tx(&self, _tx: &Transaction, _fluff: bool) -> Result<(), Error> {
+			unimplemented!()
+		}
+		fn get_version_info(&mut self) -> Option<crate::NodeVersionInfo> {
+			None
+		}
+		fn get_chain_tip(&self) -> Result<(u64, String), Error> {
+			unimplemented!()
+		}
+		fn get_kernel(
+			&mut self,
+			_excess: &pedersen::Commitment,
+			_min_height: Option<u64>,
+			_max_height: Option<u64>,
+		) -> Result<Option<(TxKernel, u64, u64)>, Error> {
+			unimplemented!()
+		}
+		fn get_outputs_from_node(
+			&self,
+			_wallet_outputs: Vec<pedersen::Commitment>,
+		) -> Result<HashMap<pedersen::Commitment, (String, u64, u64)>, Error> {
+			unimplemented!()
+		}
+		fn get_outputs_by_pmmr_index(
+			&self,
+			_start_height: u64,
+			_end_height: Option<u64>,
+			_max_outputs: u64,
+		) -> Result<
+			(
+				u64,
+				u64,
+				Vec<(pedersen::Commitment, pedersen::RangeProof, bool, u64, u64)>,
+			),
+			Error,
+		> {
+			unimplemented!()
+		}
+		fn height_range_to_pmmr_indices(
+			&self,
+			_start_height: u64,
+			_end_height: Option<u64>,
+		) -> Result<(u64, u64), Error> {
+			unimplemented!()
+		}
+	}
+
+	struct TempDir(std::path::PathBuf);
+
+	impl TempDir {
+		fn new(name: &str) -> TempDir {
+			let mut p = std::env::temp_dir();
+			p.push(format!(
+				"{}-{}-{}",
+				name,
+				std::process::id(),
+				Uuid::new_v4()
+			));
+			fs::create_dir_all(&p).unwrap();
+			TempDir(p)
+		}
+	}
+
+	impl Drop for TempDir {
+		fn drop(&mut self) {
+			let _ = fs::remove_dir_all(&self.0);
+		}
+	}
+
+	fn open_wallet(dir: &TempDir) -> WalletBackend<NoNode, ExtKeychain> {
+		grin_core::global::set_local_chain_type(grin_core::global::ChainTypes::AutomatedTesting);
+		let mut w = WalletBackend::new(dir.0.to_str().unwrap(), NoNode).unwrap();
+		let k = ExtKeychain::from_random_seed(true).unwrap();
+		w.set_keychain(k, false, false).unwrap();
+		w
+	}
+
+	/// A context whose four secret fields all differ.
+	fn test_context(w: &mut WalletBackend<NoNode, ExtKeychain>) -> Context {
+		let k = w.keychain(None).unwrap();
+		let secp = k.secp();
+		let mut ctx = Context::new(secp, &ExtKeychain::root_key_id(), false, true);
+		ctx.initial_sec_key = SecretKey::new(secp, &mut thread_rng());
+		ctx.initial_sec_nonce = SecretKey::new(secp, &mut thread_rng());
+		ctx
+	}
+
+	fn stored(w: &WalletBackend<NoNode, ExtKeychain>, slate_id: &[u8]) -> Context {
+		w.db.get_ser(
+			Some(PRIVATE_TX_CONTEXT_PREFIX),
+			&to_key_u64(slate_id, 0),
+			None,
+		)
+		.unwrap()
+		.unwrap()
+	}
+
+	fn assert_secrets_eq(a: &Context, b: &Context) {
+		assert_eq!(a.sec_key, b.sec_key);
+		assert_eq!(a.sec_nonce, b.sec_nonce);
+		assert_eq!(a.initial_sec_key, b.initial_sec_key);
+		assert_eq!(a.initial_sec_nonce, b.initial_sec_nonce);
+	}
+
+	fn assert_no_secret_stored_in_clear(stored: &Context, ctx: &Context) {
+		for secret in &[
+			&ctx.sec_key,
+			&ctx.sec_nonce,
+			&ctx.initial_sec_key,
+			&ctx.initial_sec_nonce,
+		] {
+			for field in &[
+				&stored.sec_key,
+				&stored.sec_nonce,
+				&stored.initial_sec_key,
+				&stored.initial_sec_nonce,
+			] {
+				assert_ne!(*secret, *field);
+			}
+		}
+	}
+
+	#[test]
+	fn stored_context_has_no_secret_in_clear() {
+		let dir = TempDir::new("ctx-storage");
+		let mut w = open_wallet(&dir);
+		let ctx = test_context(&mut w);
+		let slate_id = Uuid::new_v4();
+		{
+			let mut batch = w.batch(None).unwrap();
+			batch
+				.save_private_context(slate_id.as_bytes(), &ctx)
+				.unwrap();
+			batch.commit().unwrap();
+		}
+
+		let raw = stored(&w, slate_id.as_bytes());
+		assert_eq!(raw.storage_version, CONTEXT_STORAGE_VERSION);
+		assert_no_secret_stored_in_clear(&raw, &ctx);
+
+		let loaded = w.get_private_context(None, slate_id.as_bytes()).unwrap();
+		assert_secrets_eq(&loaded, &ctx);
+	}
+
+	#[test]
+	fn version_0_context_loads_and_upgrades() {
+		let dir = TempDir::new("ctx-upgrade");
+		let mut w = open_wallet(&dir);
+		let ctx = test_context(&mut w);
+		let slate_id = Uuid::new_v4();
+
+		// Write the record the way versions before the storage_version field
+		// did: only sec_key and sec_nonce masked, and no version field.
+		let masks = private_ctx_xor_keys(&w.keychain(None).unwrap(), slate_id.as_bytes()).unwrap();
+		let mut legacy = ctx.clone();
+		legacy.storage_version = 0;
+		masks.apply(&mut legacy, 0);
+		let mut json = serde_json::to_value(&legacy).unwrap();
+		json.as_object_mut().unwrap().remove("storage_version");
+		let legacy: Context = serde_json::from_value(json).unwrap();
+		assert_eq!(legacy.storage_version, 0);
+		{
+			let mut batch = w.batch(None).unwrap();
+			batch
+				.db
+				.put_ser(
+					Some(PRIVATE_TX_CONTEXT_PREFIX),
+					&to_key_u64(slate_id.as_bytes(), 0),
+					&legacy,
+				)
+				.unwrap();
+			batch.commit().unwrap();
+		}
+
+		let loaded = w.get_private_context(None, slate_id.as_bytes()).unwrap();
+		assert_secrets_eq(&loaded, &ctx);
+
+		let upgraded = {
+			let mut batch = w.batch(None).unwrap();
+			let n = batch.upgrade_private_contexts().unwrap();
+			batch.commit().unwrap();
+			n
+		};
+		assert_eq!(upgraded, 1);
+
+		let raw = stored(&w, slate_id.as_bytes());
+		assert_eq!(raw.storage_version, CONTEXT_STORAGE_VERSION);
+		assert_no_secret_stored_in_clear(&raw, &ctx);
+		let loaded = w.get_private_context(None, slate_id.as_bytes()).unwrap();
+		assert_secrets_eq(&loaded, &ctx);
+
+		let again = {
+			let mut batch = w.batch(None).unwrap();
+			batch.upgrade_private_contexts().unwrap()
+		};
+		assert_eq!(again, 0);
+	}
 }
