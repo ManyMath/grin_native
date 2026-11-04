@@ -441,7 +441,14 @@ where
 		.filter(|x| x.root_key_id == *parent_key_id && x.status != OutputStatus::Spent)
 		.collect();
 
-	let tx_entries = retrieve_txs(wallet, None, None, None, Some(&parent_key_id), true)?;
+	// Unconfirmed transactions, including ones cancelled here: cancelling
+	// unlocks the inputs, but a counterparty holding the signed transaction
+	// can still get it mined, so those inputs may already be spent.
+	let tx_entries: Vec<TxLogEntry> =
+		retrieve_txs(wallet, None, None, None, Some(&parent_key_id), false)?
+			.into_iter()
+			.filter(|te| !te.confirmed)
+			.collect();
 
 	// Only select outputs that are actually involved in an outstanding transaction
 	let unspents = match update_all {
@@ -615,6 +622,19 @@ where
 							output.mark_reverted();
 						} else {
 							output.mark_spent();
+							// An input of a transaction cancelled here was spent
+							// after all: the counterparty got it mined.
+							let cancelled = batch.tx_log_iter()?.filter_map(Result::ok).find(|t| {
+								Some(t.id) == output.tx_log_entry
+									&& t.parent_key_id == *parent_key_id
+									&& t.tx_type == TxLogEntryType::TxSentCancelled
+							});
+							if let Some(mut t) = cancelled {
+								t.tx_type = TxLogEntryType::TxSent;
+								t.update_confirmation_ts();
+								t.confirmed = true;
+								batch.save_tx_log_entry(t, &parent_key_id)?;
+							}
 						}
 					}
 				}
