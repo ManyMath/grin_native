@@ -25,6 +25,34 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::{Builder, Handle, Runtime};
 
+/// Largest response body accepted from a node or a payment recipient.
+/// The largest legitimate replies, output batches during a scan, are a few
+/// MiB.
+const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Reads a response body as UTF-8, failing once it exceeds `limit` bytes
+/// rather than buffering whatever the server sends.
+async fn read_body(mut resp: reqwest::Response, limit: usize) -> Result<String, Error> {
+	let too_large = || Error::ResponseError(format!("Response larger than {} bytes", limit));
+	if let Some(len) = resp.content_length() {
+		if len > limit as u64 {
+			return Err(too_large());
+		}
+	}
+	let mut body = Vec::new();
+	while let Some(chunk) = resp
+		.chunk()
+		.await
+		.map_err(|e| Error::ResponseError(format!("Cannot read response: {}", e)))?
+	{
+		if body.len() + chunk.len() > limit {
+			return Err(too_large());
+		}
+		body.extend_from_slice(&chunk);
+	}
+	String::from_utf8(body).map_err(|_| Error::ResponseError("Response is not UTF-8".into()))
+}
+
 // Global Tokio runtime.
 lazy_static! {
 	pub static ref RUNTIME: Arc<Runtime> =
@@ -282,11 +310,7 @@ impl Client {
 		if status.is_client_error() || status.is_server_error() {
 			return Err(Error::ResponseError(format!("HTTP {}", status)));
 		}
-		let text = resp
-			.text()
-			.await
-			.map_err(|e| Error::ResponseError(format!("Cannot parse response: {}", e)))?;
-		Ok(text)
+		read_body(resp, MAX_RESPONSE_BYTES).await
 	}
 
 	pub fn send_request(&self, req: RequestBuilder) -> Result<String, Error> {
@@ -361,5 +385,78 @@ mod tests {
 			);
 			server.await.unwrap();
 		}
+	}
+
+	/// Serves one response made of `head` followed by `body_len` spaces.
+	async fn serve_once(head: String, body_len: usize) -> String {
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let url = format!("http://{}", listener.local_addr().unwrap());
+		tokio::spawn(async move {
+			let (mut stream, _) = listener.accept().await.unwrap();
+			let mut headers = BufReader::new(&mut stream).lines();
+			while let Some(line) = headers.next_line().await.unwrap() {
+				if line.is_empty() {
+					break;
+				}
+			}
+			let _ = stream.write_all(head.as_bytes()).await;
+			let block = vec![b' '; 4096];
+			let mut left = body_len;
+			while left > 0 {
+				let n = left.min(block.len());
+				if stream.write_all(&block[..n]).await.is_err() {
+					return;
+				}
+				left -= n;
+			}
+		});
+		url
+	}
+
+	async fn body_of(url: &str, limit: usize) -> Result<String, Error> {
+		let resp = reqwest::Client::builder()
+			.no_proxy()
+			.build()
+			.unwrap()
+			.get(url)
+			.send()
+			.await
+			.unwrap();
+		read_body(resp, limit).await
+	}
+
+	#[tokio::test]
+	async fn response_size_limit() {
+		let limit = 64 * 1024;
+
+		// Declared length over the limit.
+		let url = serve_once(
+			format!(
+				"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+				limit + 1
+			),
+			limit + 1,
+		)
+		.await;
+		assert!(body_of(&url, limit).await.is_err());
+
+		// No declared length; the body runs past the limit.
+		let url = serve_once(
+			"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_string(),
+			limit * 4,
+		)
+		.await;
+		assert!(body_of(&url, limit).await.is_err());
+
+		// Exactly the limit is accepted.
+		let url = serve_once(
+			format!(
+				"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+				limit
+			),
+			limit,
+		)
+		.await;
+		assert_eq!(body_of(&url, limit).await.unwrap().len(), limit);
 	}
 }
