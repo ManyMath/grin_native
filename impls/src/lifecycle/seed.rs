@@ -16,7 +16,7 @@ use crate::blake2;
 use core::num::NonZeroU32;
 use rand::{thread_rng, Rng};
 use serde_json;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::path::MAIN_SEPARATOR;
@@ -30,6 +30,79 @@ use crate::util::{self, ToHex};
 use crate::Error;
 
 pub const SEED_FILE: &str = "wallet.seed";
+
+/// Temporary file a new seed file is written to before it replaces
+/// [`SEED_FILE`].
+const SEED_TMP_FILE: &str = "wallet.seed.tmp";
+
+/// PBKDF2-HMAC-SHA512 iterations for newly written seed files.
+pub const SEED_KDF_ITERATIONS: u32 = 210_000;
+
+/// Iterations used by seed files that do not record a count.
+const LEGACY_SEED_KDF_ITERATIONS: u32 = 100;
+
+/// Upper bound on a recorded count, so a damaged or hostile file cannot make
+/// opening the wallet take arbitrarily long.
+const MAX_SEED_KDF_ITERATIONS: u32 = 10_000_000;
+
+/// Salt length for newly written seed files.
+const SEED_SALT_BYTES: usize = 16;
+
+/// Creates `path` for writing, readable and writable only by its owner where
+/// the platform supports it.
+fn create_private_file(path: &Path) -> std::io::Result<File> {
+	let mut opts = OpenOptions::new();
+	opts.write(true).create(true).truncate(true);
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::OpenOptionsExt;
+		opts.mode(0o600);
+	}
+	opts.open(path)
+}
+
+/// Writes `enc_seed` as the seed file of `data_file_dir`.
+///
+/// The content goes to a temporary file that is synced and then renamed over
+/// the seed file, so a failure at any point leaves either the old seed file
+/// or the complete new one.
+fn write_seed_file(data_file_dir: &str, enc_seed: &EncryptedWalletSeed) -> Result<(), Error> {
+	let dir = fmt_path(data_file_dir.to_string());
+	let seed_path = Path::new(&dir).join(SEED_FILE);
+	let tmp_path = Path::new(&dir).join(SEED_TMP_FILE);
+	let json = serde_json::to_string_pretty(enc_seed).map_err(|_| Error::Format)?;
+
+	let write_tmp = || -> std::io::Result<()> {
+		let mut file = create_private_file(&tmp_path)?;
+		file.write_all(json.as_bytes())?;
+		file.sync_all()
+	};
+	if let Err(e) = write_tmp() {
+		let _ = fs::remove_file(&tmp_path);
+		error!("Could not write {}: {}", tmp_path.display(), e);
+		return Err(Error::IO);
+	}
+	if let Err(e) = fs::rename(&tmp_path, &seed_path) {
+		let _ = fs::remove_file(&tmp_path);
+		error!("Could not replace {}: {}", seed_path.display(), e);
+		return Err(Error::IO);
+	}
+	// Make the rename itself durable. Not supported on every platform.
+	#[cfg(unix)]
+	{
+		if let Ok(d) = File::open(&dir) {
+			let _ = d.sync_all();
+		}
+	}
+	Ok(())
+}
+
+fn read_encrypted_seed(seed_file_path: &str) -> Result<EncryptedWalletSeed, Error> {
+	let mut file = File::open(seed_file_path).map_err(|_| Error::IO)?;
+	let mut buffer = String::new();
+	file.read_to_string(&mut buffer).map_err(|_| Error::IO)?;
+	serde_json::from_str(&buffer).map_err(|_| Error::Format)
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WalletSeed(Vec<u8>);
@@ -135,8 +208,16 @@ impl WalletSeed {
 			i += 1;
 		}
 		path.push(backup_seed_file_name.clone());
-		if fs::rename(seed_file_name, backup_seed_file_name.as_str()).is_err() {
-			return Err(Error::GenericError("Can't rename wallet seed file".to_owned()).into());
+		// Copy rather than move, so the seed file stays in place until a
+		// complete replacement is renamed over it.
+		if fs::copy(seed_file_name, backup_seed_file_name.as_str()).is_err() {
+			let _ = fs::remove_file(&backup_seed_file_name);
+			return Err(Error::GenericError("Can't back up wallet seed file".to_owned()).into());
+		}
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::PermissionsExt;
+			let _ = fs::set_permissions(&backup_seed_file_name, fs::Permissions::from_mode(0o600));
 		}
 		warn!("{} backed up as {}", seed_file_name, backup_seed_file_name);
 		Ok(backup_seed_file_name)
@@ -168,10 +249,8 @@ impl WalletSeed {
 		}
 		let seed = WalletSeed::from_mnemonic(word_list)?;
 		let enc_seed = EncryptedWalletSeed::from_seed(&seed, password)?;
-		let enc_seed_json = serde_json::to_string_pretty(&enc_seed).map_err(|_| Error::Format)?;
-		let mut file = File::create(seed_file_path).map_err(|_| Error::IO)?;
-		file.write_all(&enc_seed_json.as_bytes())
-			.map_err(|_| Error::IO)?;
+		debug!("Writing seed file at: {}", seed_file_path);
+		write_seed_file(data_file_dir, &enc_seed)?;
 		warn!("Seed created from word list");
 		Ok(())
 	}
@@ -207,11 +286,46 @@ impl WalletSeed {
 		};
 
 		let enc_seed = EncryptedWalletSeed::from_seed(&seed, password)?;
-		let enc_seed_json = serde_json::to_string_pretty(&enc_seed).map_err(|_| Error::Format)?;
-		let mut file = File::create(seed_file_path).map_err(|_| Error::IO)?;
-		file.write_all(&enc_seed_json.as_bytes())
-			.map_err(|_| Error::IO)?;
+		debug!("Writing seed file at: {}", seed_file_path);
+		write_seed_file(&data_file_dir, &enc_seed)?;
 		Ok(seed)
+	}
+
+	/// Re-encrypts the seed file of `data_file_dir` with `password`, using
+	/// the current key derivation parameters, and checks the result before
+	/// returning. The file is replaced atomically.
+	pub fn rewrite_file(
+		data_file_dir: &str,
+		seed: &WalletSeed,
+		password: util::ZeroingString,
+	) -> Result<(), Error> {
+		let enc_seed = EncryptedWalletSeed::from_seed(seed, password.clone())?;
+		if enc_seed.decrypt(&password)? != *seed {
+			return Err(Error::Encryption);
+		}
+		write_seed_file(data_file_dir, &enc_seed)?;
+		if WalletSeed::from_file(data_file_dir, password)? != *seed {
+			return Err(Error::Encryption);
+		}
+		Ok(())
+	}
+
+	/// Rewrites the seed file with the current key derivation parameters if
+	/// it uses weaker ones. Returns whether it was rewritten.
+	pub fn upgrade_file(data_file_dir: &str, password: util::ZeroingString) -> Result<bool, Error> {
+		let seed_file_path = &format!(
+			"{}{}{}",
+			fmt_path(data_file_dir.to_string()),
+			MAIN_SEPARATOR,
+			SEED_FILE,
+		);
+		let enc_seed = read_encrypted_seed(seed_file_path)?;
+		if enc_seed.kdf_iterations()? >= SEED_KDF_ITERATIONS {
+			return Ok(false);
+		}
+		let seed = enc_seed.decrypt(&password)?;
+		WalletSeed::rewrite_file(data_file_dir, &seed, password)?;
+		Ok(true)
 	}
 
 	pub fn from_file(
@@ -231,11 +345,7 @@ impl WalletSeed {
 		debug!("Using wallet seed file at: {}", seed_file_path);
 
 		if Path::new(seed_file_path).exists() {
-			let mut file = File::open(seed_file_path).map_err(|_| Error::IO)?;
-			let mut buffer = String::new();
-			file.read_to_string(&mut buffer).map_err(|_| Error::IO)?;
-			let enc_seed: EncryptedWalletSeed =
-				serde_json::from_str(&buffer).map_err(|_| Error::Format)?;
+			let enc_seed = read_encrypted_seed(seed_file_path)?;
 			let wallet_seed = enc_seed.decrypt(&password)?;
 			Ok(wallet_seed)
 		} else {
@@ -263,6 +373,20 @@ impl WalletSeed {
 	}
 }
 
+/// Derives the seed encryption key from a password.
+fn seed_key(password: &[u8], salt: &[u8], iterations: u32) -> Result<[u8; 32], Error> {
+	let iterations = NonZeroU32::new(iterations).ok_or(Error::Format)?;
+	let mut key = [0; 32];
+	pbkdf2::derive(
+		pbkdf2::PBKDF2_HMAC_SHA512,
+		iterations,
+		salt,
+		password,
+		&mut key,
+	);
+	Ok(key)
+}
+
 /// Encrypted wallet seed, for storing on disk and decrypting
 /// with provided password
 
@@ -274,6 +398,10 @@ pub struct EncryptedWalletSeed {
 	pub salt: String,
 	/// Nonce
 	pub nonce: String,
+	/// PBKDF2-HMAC-SHA512 iterations. Files written before this field
+	/// existed use 100.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub kdf_iterations: Option<u32>,
 }
 
 impl EncryptedWalletSeed {
@@ -282,17 +410,17 @@ impl EncryptedWalletSeed {
 		seed: &WalletSeed,
 		password: util::ZeroingString,
 	) -> Result<EncryptedWalletSeed, Error> {
-		let salt: [u8; 8] = thread_rng().gen();
+		EncryptedWalletSeed::from_seed_with(seed, password, SEED_KDF_ITERATIONS)
+	}
+
+	fn from_seed_with(
+		seed: &WalletSeed,
+		password: util::ZeroingString,
+		iterations: u32,
+	) -> Result<EncryptedWalletSeed, Error> {
+		let salt: [u8; SEED_SALT_BYTES] = thread_rng().gen();
 		let nonce: [u8; 12] = thread_rng().gen();
-		let password = password.as_bytes();
-		let mut key = [0; 32];
-		pbkdf2::derive(
-			pbkdf2::PBKDF2_HMAC_SHA512,
-			NonZeroU32::new(100).unwrap(),
-			&salt,
-			password,
-			&mut key,
-		);
+		let key = seed_key(password.as_bytes(), &salt, iterations)?;
 		let content = seed.0.to_vec();
 		let mut enc_bytes = content;
 		/*let suffix_len = aead::CHACHA20_POLY1305.tag_len();
@@ -315,7 +443,17 @@ impl EncryptedWalletSeed {
 			encrypted_seed: enc_bytes.to_hex(),
 			salt: salt.to_hex(),
 			nonce: nonce.to_hex(),
+			kdf_iterations: Some(iterations),
 		})
+	}
+
+	/// The iteration count this seed was encrypted with.
+	pub fn kdf_iterations(&self) -> Result<u32, Error> {
+		match self.kdf_iterations {
+			None => Ok(LEGACY_SEED_KDF_ITERATIONS),
+			Some(n) if n >= 1 && n <= MAX_SEED_KDF_ITERATIONS => Ok(n),
+			Some(_) => Err(Error::Format),
+		}
 	}
 
 	/// Decrypt seed
@@ -332,15 +470,7 @@ impl EncryptedWalletSeed {
 			Ok(s) => s,
 			Err(_) => return Err(Error::Encryption),
 		};
-		let password = password.as_bytes();
-		let mut key = [0; 32];
-		pbkdf2::derive(
-			pbkdf2::PBKDF2_HMAC_SHA512,
-			NonZeroU32::new(100).unwrap(),
-			&salt,
-			password,
-			&mut key,
-		);
+		let key = seed_key(password.as_bytes(), &salt, self.kdf_iterations()?)?;
 
 		let mut n = [0u8; 12];
 		n.copy_from_slice(&nonce[0..12]);
@@ -389,5 +519,136 @@ mod tests {
 		enc_wallet_seed.nonce = "wrongnonce".to_owned();
 		let decrypted_wallet_seed = enc_wallet_seed.decrypt(&password);
 		assert!(decrypted_wallet_seed.is_err());
+	}
+
+	struct TempDir(std::path::PathBuf);
+
+	impl TempDir {
+		fn new(name: &str) -> TempDir {
+			let mut p = std::env::temp_dir();
+			let n: u64 = thread_rng().gen();
+			p.push(format!("{}-{}-{:x}", name, std::process::id(), n));
+			fs::create_dir_all(&p).unwrap();
+			TempDir(p)
+		}
+
+		fn path(&self) -> &str {
+			self.0.to_str().unwrap()
+		}
+
+		fn file(&self, name: &str) -> std::path::PathBuf {
+			self.0.join(name)
+		}
+	}
+
+	impl Drop for TempDir {
+		fn drop(&mut self) {
+			let _ = fs::remove_dir_all(&self.0);
+		}
+	}
+
+	/// Writes a seed file the way versions before `kdf_iterations` did.
+	fn write_legacy_seed(dir: &TempDir, seed: &WalletSeed, password: &ZeroingString) {
+		let mut enc =
+			EncryptedWalletSeed::from_seed_with(seed, password.clone(), LEGACY_SEED_KDF_ITERATIONS)
+				.unwrap();
+		enc.kdf_iterations = None;
+		let json = serde_json::to_string_pretty(&enc).unwrap();
+		assert!(!json.contains("kdf_iterations"));
+		fs::write(dir.file(SEED_FILE), json).unwrap();
+	}
+
+	fn stored_iterations(dir: &TempDir) -> u32 {
+		read_encrypted_seed(dir.file(SEED_FILE).to_str().unwrap())
+			.unwrap()
+			.kdf_iterations()
+			.unwrap()
+	}
+
+	#[test]
+	fn new_seed_file_records_iterations() {
+		let dir = TempDir::new("seed-new");
+		let password = ZeroingString::from("passwoid");
+		let seed = WalletSeed::init_file(dir.path(), 32, None, password.clone(), false).unwrap();
+		assert_eq!(stored_iterations(&dir), SEED_KDF_ITERATIONS);
+		assert_eq!(WalletSeed::from_file(dir.path(), password).unwrap(), seed);
+		assert!(!dir.file(SEED_TMP_FILE).exists());
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::PermissionsExt;
+			let mode = fs::metadata(dir.file(SEED_FILE))
+				.unwrap()
+				.permissions()
+				.mode();
+			assert_eq!(mode & 0o777, 0o600);
+		}
+	}
+
+	#[test]
+	fn legacy_seed_file_opens_and_upgrades() {
+		let dir = TempDir::new("seed-legacy");
+		let password = ZeroingString::from("passwoid");
+		let seed = WalletSeed::init_new(32, false, None).unwrap();
+		write_legacy_seed(&dir, &seed, &password);
+		assert_eq!(stored_iterations(&dir), LEGACY_SEED_KDF_ITERATIONS);
+		assert_eq!(
+			WalletSeed::from_file(dir.path(), password.clone()).unwrap(),
+			seed
+		);
+
+		assert!(WalletSeed::upgrade_file(dir.path(), password.clone()).unwrap());
+		assert_eq!(stored_iterations(&dir), SEED_KDF_ITERATIONS);
+		assert_eq!(
+			WalletSeed::from_file(dir.path(), password.clone()).unwrap(),
+			seed
+		);
+		assert!(!WalletSeed::upgrade_file(dir.path(), password).unwrap());
+	}
+
+	#[test]
+	fn upgrade_with_wrong_password_leaves_file() {
+		let dir = TempDir::new("seed-wrongpw");
+		let password = ZeroingString::from("passwoid");
+		let seed = WalletSeed::init_new(32, false, None).unwrap();
+		write_legacy_seed(&dir, &seed, &password);
+		let before = fs::read(dir.file(SEED_FILE)).unwrap();
+		assert!(WalletSeed::upgrade_file(dir.path(), ZeroingString::from("nope")).is_err());
+		assert_eq!(fs::read(dir.file(SEED_FILE)).unwrap(), before);
+	}
+
+	#[test]
+	fn failed_rewrite_keeps_old_seed_file() {
+		let dir = TempDir::new("seed-fail");
+		let old = ZeroingString::from("old");
+		let seed = WalletSeed::init_file(dir.path(), 32, None, old.clone(), false).unwrap();
+		let before = fs::read(dir.file(SEED_FILE)).unwrap();
+		// A directory where the temporary file goes makes the write fail.
+		fs::create_dir(dir.file(SEED_TMP_FILE)).unwrap();
+		assert!(WalletSeed::rewrite_file(dir.path(), &seed, ZeroingString::from("new")).is_err());
+		assert_eq!(fs::read(dir.file(SEED_FILE)).unwrap(), before);
+		assert_eq!(WalletSeed::from_file(dir.path(), old).unwrap(), seed);
+	}
+
+	#[test]
+	fn rewrite_changes_password() {
+		let dir = TempDir::new("seed-rewrite");
+		let old = ZeroingString::from("old");
+		let new = ZeroingString::from("new");
+		let seed = WalletSeed::init_file(dir.path(), 32, None, old.clone(), false).unwrap();
+		WalletSeed::rewrite_file(dir.path(), &seed, new.clone()).unwrap();
+		assert!(WalletSeed::from_file(dir.path(), old).is_err());
+		assert_eq!(WalletSeed::from_file(dir.path(), new).unwrap(), seed);
+		assert!(!dir.file(SEED_TMP_FILE).exists());
+	}
+
+	#[test]
+	fn out_of_range_iterations_are_rejected() {
+		let seed = WalletSeed::init_new(32, false, None).unwrap();
+		let password = ZeroingString::from("passwoid");
+		let mut enc = EncryptedWalletSeed::from_seed(&seed, password.clone()).unwrap();
+		enc.kdf_iterations = Some(0);
+		assert!(enc.decrypt(&password).is_err());
+		enc.kdf_iterations = Some(MAX_SEED_KDF_ITERATIONS + 1);
+		assert!(enc.decrypt(&password).is_err());
 	}
 }

@@ -244,9 +244,17 @@ where
 				}
 				Ok(d) => d,
 			};
-		let wallet_seed = WalletSeed::from_file(&data_dir_name, password).map_err(|_| {
-			Error::Lifecycle("Error opening wallet (is password correct?)".to_owned())
-		})?;
+		let wallet_seed =
+			WalletSeed::from_file(&data_dir_name, password.clone()).map_err(|_| {
+				Error::Lifecycle("Error opening wallet (is password correct?)".to_owned())
+			})?;
+		// Re-encrypt a seed file written with older key derivation settings.
+		// The old file stays in place if this fails.
+		match WalletSeed::upgrade_file(&data_dir_name, password) {
+			Ok(true) => info!("Upgraded wallet seed file encryption"),
+			Ok(false) => {}
+			Err(e) => warn!("Could not upgrade wallet seed file encryption: {}", e),
+		}
 		if wallet_seed.is_empty() {
 			warn!("This wallet has an empty seed and its funds are unsafe. Move them to a new wallet.");
 		}
@@ -336,45 +344,18 @@ where
 		let mut data_dir_name = PathBuf::from(self.data_dir.clone());
 		data_dir_name.push(GRIN_WALLET_DIR);
 		let data_dir_name = data_dir_name.to_str().unwrap();
-		// Get seed for later check
 		let orig_wallet_seed = WalletSeed::from_file(&data_dir_name, old)
 			.map_err(|_| Error::Lifecycle("Error opening wallet seed file".into()))?;
-		let orig_mnemonic = orig_wallet_seed
+		// Refuse to rewrite a seed that has no valid mnemonic.
+		orig_wallet_seed
 			.to_mnemonic()
 			.map_err(|_| Error::Lifecycle("Error recovering mnemonic".into()))?;
 
-		// Back up existing seed, and keep track of filename as we're deleting it
-		// once the password change is confirmed
-		let backup_name = WalletSeed::backup_seed(data_dir_name)
-			.map_err(|_| Error::Lifecycle("Error temporarily backing up existing seed".into()))?;
-
-		// Delete seed file
-		WalletSeed::delete_seed_file(data_dir_name).map_err(|_| {
-			Error::Lifecycle("Unable to delete seed file for password change".into())
-		})?;
-
-		// Init a new file
-		let _ = WalletSeed::init_file(
-			data_dir_name,
-			0,
-			Some(ZeroingString::from(orig_mnemonic)),
-			new.clone(),
-			false,
-		);
-		info!("Wallet seed file created");
-
-		let new_wallet_seed = WalletSeed::from_file(&data_dir_name, new)
-			.map_err(|_| Error::Lifecycle("Error opening wallet seed file".into()))?;
-
-		if orig_wallet_seed != new_wallet_seed {
-			let msg =
-				"New and Old wallet seeds are not equal on password change, not removing backups."
-					.to_string();
-			return Err(Error::Lifecycle(msg));
-		}
-		// Removing old file
-		info!("Password change confirmed, removing old seed file.");
-		fs::remove_file(backup_name).map_err(|e| Error::IO(e.to_string()))?;
+		// The new seed file is written beside the old one and renamed over
+		// it, so a failure leaves the old file in place.
+		WalletSeed::rewrite_file(data_dir_name, &orig_wallet_seed, new)
+			.map_err(|e| Error::Lifecycle(format!("Error writing new wallet seed file: {}", e)))?;
+		info!("Password change confirmed");
 
 		Ok(())
 	}
