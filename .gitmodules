@@ -1,4 +1,4 @@
 [submodule "grin"]
 	path = grin
-	branch = master
-	url = https://github.com/mimblewimble/grin
+	branch = hardening
+	url = ssh://git@git.cypherstack.com:222/sneurlax/grin.git
