@@ -472,6 +472,9 @@ impl EncryptedWalletSeed {
 		};
 		let key = seed_key(password.as_bytes(), &salt, self.kdf_iterations()?)?;
 
+		if nonce.len() != 12 {
+			return Err(Error::Encryption);
+		}
 		let mut n = [0u8; 12];
 		n.copy_from_slice(&nonce[0..12]);
 		let unbound_key = aead::UnboundKey::new(&aead::CHACHA20_POLY1305, &key).unwrap();
@@ -517,6 +520,11 @@ mod tests {
 
 		// Wrong nonce
 		enc_wallet_seed.nonce = "wrongnonce".to_owned();
+		let decrypted_wallet_seed = enc_wallet_seed.decrypt(&password);
+		assert!(decrypted_wallet_seed.is_err());
+
+		// Nonce of the wrong length
+		enc_wallet_seed.nonce = "00".to_owned();
 		let decrypted_wallet_seed = enc_wallet_seed.decrypt(&password);
 		assert!(decrypted_wallet_seed.is_err());
 	}
