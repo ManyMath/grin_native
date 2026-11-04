@@ -348,6 +348,11 @@ impl OutputPrintable {
 
 		let p_vec = util::from_hex(&proof_str)
 			.map_err(|_| ser::Error::HexError("invalid output range_proof".to_string()))?;
+		if p_vec.len() < util::secp::constants::MAX_PROOF_SIZE {
+			return Err(ser::Error::HexError(
+				"output range_proof too short".to_string(),
+			));
+		}
 		let mut p_bytes = [0; util::secp::constants::MAX_PROOF_SIZE];
 		p_bytes.clone_from_slice(&p_vec[..util::secp::constants::MAX_PROOF_SIZE]);
 		Ok(pedersen::RangeProof {
@@ -465,7 +470,8 @@ impl<'de> serde::de::Deserialize<'de> for OutputPrintable {
 				}
 
 				if output_type.is_none()
-					|| commit.is_none() || spent.is_none()
+					|| commit.is_none()
+					|| spent.is_none()
 					|| proof_hash.is_none()
 					|| mmr_index.is_none()
 				{
@@ -478,7 +484,8 @@ impl<'de> serde::de::Deserialize<'de> for OutputPrintable {
 					spent: spent.unwrap(),
 					proof: proof,
 					proof_hash: proof_hash.unwrap(),
-					block_height: block_height.unwrap(),
+					// An absent block_height means the same as null.
+					block_height: block_height.flatten(),
 					merkle_proof: merkle_proof,
 					mmr_index: mmr_index.unwrap(),
 				})
@@ -767,6 +774,44 @@ mod test {
 		let deserialized: OutputPrintable = serde_json::from_str(&hex_output).unwrap();
 		let serialized = serde_json::to_string(&deserialized).unwrap();
 		assert_eq!(serialized, hex_output);
+	}
+
+	fn output_printable_json(proof: &str, block_height: Option<&str>) -> String {
+		let block_height = match block_height {
+			Some(h) => format!("\"block_height\":{},", h),
+			None => String::new(),
+		};
+		format!(
+			"{{\"output_type\":\"Transaction\",\
+			 \"commit\":\"083eafae5d61a85ab07b12e1a51b3918d8e6de11fc6cde641d54af53608aa77b9f\",\
+			 \"spent\":false,\
+			 \"proof\":{},\
+			 \"proof_hash\":\"ed6ba96009b86173bade6a9227ed60422916593fa32dd6d78b25b7a4eeef4946\",\
+			 {}\
+			 \"merkle_proof\":null,\
+			 \"mmr_index\":1}}",
+			proof, block_height
+		)
+	}
+
+	#[test]
+	fn output_printable_without_block_height() {
+		let json = output_printable_json("null", None);
+		let output: OutputPrintable = serde_json::from_str(&json).unwrap();
+		assert_eq!(output.block_height, None);
+	}
+
+	#[test]
+	fn output_printable_range_proof_length() {
+		let short = output_printable_json("\"00\"", Some("1"));
+		let output: OutputPrintable = serde_json::from_str(&short).unwrap();
+		assert!(output.range_proof().is_err());
+
+		let full = format!("\"{}\"", "00".repeat(util::secp::constants::MAX_PROOF_SIZE));
+		let output: OutputPrintable =
+			serde_json::from_str(&output_printable_json(&full, Some("1"))).unwrap();
+		let proof = output.range_proof().unwrap();
+		assert_eq!(proof.plen, util::secp::constants::MAX_PROOF_SIZE);
 	}
 
 	#[test]
