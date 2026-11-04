@@ -504,6 +504,11 @@ where
 		}
 		_ => {}
 	}
+	// A cancelled transaction is never finalized here, so its signing
+	// context is no longer needed.
+	if let Some(slate_id) = tx.tx_slate_id {
+		batch.delete_private_context(slate_id.as_bytes())?;
+	}
 	batch.save_tx_log_entry(tx, parent_key_id)?;
 	batch.commit()?;
 	Ok(())
