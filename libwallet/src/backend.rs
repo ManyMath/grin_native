@@ -423,7 +423,16 @@ where
 			.join(TX_SAVE_DIR)
 			.join(filename);
 		let path_buf = Path::new(&path).to_path_buf();
-		let mut stored_tx = File::create(path_buf)?;
+		// Private to the owner on Unix: the file holds the wallet's inputs,
+		// outputs and kernel for this transaction.
+		let mut opts = fs::OpenOptions::new();
+		opts.write(true).create(true).truncate(true);
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::OpenOptionsExt;
+			opts.mode(0o600);
+		}
+		let mut stored_tx = opts.open(path_buf)?;
 		let tx_hex = ser::ser_vec(tx, ser::ProtocolVersion(1)).unwrap().to_hex();
 		stored_tx.write_all(&tx_hex.as_bytes())?;
 		stored_tx.sync_all()?;
