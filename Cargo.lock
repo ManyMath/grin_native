@@ -2588,6 +2588,7 @@ dependencies = [
  "tor-rtcompat",
  "url",
  "webpki-roots",
+ "zeroize",
 ]
 
 [[package]]

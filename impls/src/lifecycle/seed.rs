@@ -23,6 +23,7 @@ use std::path::MAIN_SEPARATOR;
 
 use ring::aead;
 use ring::pbkdf2;
+use zeroize::Zeroize;
 
 use crate::keychain::{mnemonic, Keychain};
 use crate::lifecycle::default::fmt_path;
@@ -104,8 +105,21 @@ fn read_encrypted_seed(seed_file_path: &str) -> Result<EncryptedWalletSeed, Erro
 	serde_json::from_str(&buffer).map_err(|_| Error::Format)
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct WalletSeed(Vec<u8>);
+
+impl Drop for WalletSeed {
+	fn drop(&mut self) {
+		self.0.zeroize();
+	}
+}
+
+impl std::fmt::Debug for WalletSeed {
+	// Never prints the seed bytes.
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "WalletSeed({} bytes)", self.0.len())
+	}
+}
 
 impl WalletSeed {
 	pub fn from_bytes(bytes: &[u8]) -> WalletSeed {
@@ -492,7 +506,9 @@ impl EncryptedWalletSeed {
 			encrypted_seed.pop();
 		}
 
-		Ok(WalletSeed::from_bytes(&encrypted_seed))
+		let seed = WalletSeed::from_bytes(&encrypted_seed);
+		encrypted_seed.zeroize();
+		Ok(seed)
 	}
 }
 
