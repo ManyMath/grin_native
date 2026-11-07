@@ -121,9 +121,13 @@ impl Client {
 		headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
 		headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
+		// A JSON-RPC endpoint has no reason to redirect. Following one would
+		// let a node or a payment recipient send the wallet's request (its
+		// output commitments, a slate) to any origin the device can reach.
 		let mut builder = Self::configure_tls(
 			ClientBuilder::new()
 				.timeout(request_timeout)
+				.redirect(reqwest::redirect::Policy::none())
 				.default_headers(headers),
 		)?;
 
@@ -307,7 +311,7 @@ impl Client {
 			.await
 			.map_err(|e| Error::RequestError(format!("Cannot make request: {}", e)))?;
 		let status = resp.status();
-		if status.is_client_error() || status.is_server_error() {
+		if status.is_redirection() || status.is_client_error() || status.is_server_error() {
 			return Err(Error::ResponseError(format!("HTTP {}", status)));
 		}
 		read_body(resp, MAX_RESPONSE_BYTES).await
@@ -347,6 +351,7 @@ mod tests {
 			client: Client::configure_tls(
 				ClientBuilder::new()
 					.no_proxy()
+					.redirect(reqwest::redirect::Policy::none())
 					.timeout(Duration::from_secs(5)),
 			)
 			.unwrap()
@@ -359,6 +364,11 @@ mod tests {
 				"401 Unauthorized",
 				"<html>Unauthorized</html>",
 				Err(Error::ResponseError("HTTP 401 Unauthorized".into())),
+			),
+			(
+				"307 Temporary Redirect",
+				"",
+				Err(Error::ResponseError("HTTP 307 Temporary Redirect".into())),
 			),
 		] {
 			let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -414,8 +424,8 @@ mod tests {
 	}
 
 	async fn body_of(url: &str, limit: usize) -> Result<String, Error> {
-		let resp = reqwest::Client::builder()
-			.no_proxy()
+		let resp = Client::configure_tls(reqwest::Client::builder().no_proxy())
+			.unwrap()
 			.build()
 			.unwrap()
 			.get(url)
@@ -458,5 +468,59 @@ mod tests {
 		)
 		.await;
 		assert_eq!(body_of(&url, limit).await.unwrap().len(), limit);
+	}
+
+	/// A redirect is reported as an error and never followed: the target
+	/// must not see a request, with or without the proxy-free client.
+	#[tokio::test]
+	async fn redirects_are_not_followed() {
+		let client = Client::new(Duration::from_secs(5)).unwrap();
+		let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let target_url = format!("http://{}", target.local_addr().unwrap());
+		let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+		let hits2 = hits.clone();
+		tokio::spawn(async move {
+			while let Ok((mut stream, _)) = target.accept().await {
+				hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+				let _ = stream
+					.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+					.await;
+			}
+		});
+		for status in [
+			"301 Moved Permanently",
+			"302 Found",
+			"307 Temporary Redirect",
+			"308 Permanent Redirect",
+		] {
+			let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+			let url = format!("http://{}", listener.local_addr().unwrap());
+			let location = target_url.clone();
+			let server = tokio::spawn(async move {
+				let (mut stream, _) = listener.accept().await.unwrap();
+				let mut headers = BufReader::new(&mut stream).lines();
+				while let Some(line) = headers.next_line().await.unwrap() {
+					if line.is_empty() {
+						break;
+					}
+				}
+				let response = format!(
+					"HTTP/1.1 {}\r\nLocation: {}/v2/foreign\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+					status, location
+				);
+				stream.write_all(response.as_bytes()).await.unwrap();
+			});
+			let res = client
+				.post_async::<_, serde_json::Value>(&url, &serde_json::json!({"a": 1}), None)
+				.await;
+			assert_eq!(
+				res,
+				Err(Error::ResponseError(format!("HTTP {}", status))),
+				"{}",
+				status
+			);
+			server.await.unwrap();
+		}
+		assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
 	}
 }
