@@ -504,6 +504,19 @@ where
 			batch.save(o)?;
 		}
 	}
+	// The receiving half of a self-send shares its slate id with the send,
+	// and the context stored under that id is the send's.
+	let send_pending = match (tx.tx_type.clone(), tx.tx_slate_id) {
+		(TxLogEntryType::TxReceived | TxLogEntryType::TxReverted, Some(slate_id)) => {
+			batch.tx_log_iter()?.filter_map(Result::ok).any(|t| {
+				t.id != tx.id
+					&& t.tx_slate_id == Some(slate_id)
+					&& t.tx_type == TxLogEntryType::TxSent
+					&& !t.confirmed
+			})
+		}
+		_ => false,
+	};
 	match tx.tx_type {
 		TxLogEntryType::TxSent => tx.tx_type = TxLogEntryType::TxSentCancelled,
 		TxLogEntryType::TxReceived | TxLogEntryType::TxReverted => {
@@ -512,9 +525,11 @@ where
 		_ => {}
 	}
 	// A cancelled transaction is never finalized here, so its signing
-	// context is no longer needed.
+	// context is no longer needed, unless a pending send still uses it.
 	if let Some(slate_id) = tx.tx_slate_id {
-		batch.delete_private_context(slate_id.as_bytes())?;
+		if !send_pending {
+			batch.delete_private_context(slate_id.as_bytes())?;
+		}
 	}
 	batch.save_tx_log_entry(tx, parent_key_id)?;
 	batch.commit()?;

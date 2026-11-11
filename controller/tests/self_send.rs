@@ -22,7 +22,7 @@ use std::path::PathBuf;
 
 use grin_wallet_libwallet as libwallet;
 use impls::test_framework::{self, LocalWalletClient};
-use libwallet::InitTxArgs;
+use libwallet::{InitTxArgs, TxLogEntryType};
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
@@ -198,4 +198,111 @@ fn late_lock_self_send_proof() -> Result<(), libwallet::Error> {
 	drop(chain);
 	clean_output_dir(test_dir);
 	result
+}
+
+/// Cancelling the receiving half of a self-send must leave the send able
+/// to finalize: both halves share the slate id, and the stored context is
+/// the send's.
+fn self_send_cancel_receive_impl(test_dir: &'static str) -> Result<(), libwallet::Error> {
+	let mut wallet_proxy = create_wallet_proxy(test_dir);
+	let chain = wallet_proxy.chain.clone();
+	let stopper = wallet_proxy.running.clone();
+
+	create_wallet_and_add!(
+		client1,
+		wallet1,
+		mask1_i,
+		test_dir,
+		"wallet1",
+		None,
+		&mut wallet_proxy,
+		true,
+		api1
+	);
+	let mask1 = (&mask1_i).as_ref();
+
+	thread::spawn(move || {
+		if let Err(e) = wallet_proxy.run() {
+			error!("Wallet Proxy error: {}", e);
+		}
+	});
+
+	let reward = core::consensus::REWARD;
+	let _ = test_framework::award_blocks_to_wallet(&chain, wallet1.clone(), mask1, 10, false);
+
+	let args = InitTxArgs {
+		amount: reward * 2,
+		minimum_confirmations: 2,
+		max_outputs: 500,
+		num_change_outputs: 1,
+		selection_strategy_is_use_all: true,
+		..Default::default()
+	};
+	let mut slate = api1.init_send_tx(mask1, args)?;
+	api1.tx_lock_outputs(mask1, &slate)?;
+	wallet::controller::foreign_single_use(
+		wallet1.clone(),
+		PathBuf::from(test_dir),
+		mask1_i.clone(),
+		|api| {
+			slate = api.receive_tx(&slate, None, None)?;
+			Ok(())
+		},
+	)?;
+
+	let (_, txs) = api1.retrieve_txs(mask1, false, None, Some(slate.id), None)?;
+	assert_eq!(txs.len(), 2);
+	let received = txs
+		.iter()
+		.find(|t| t.tx_type == TxLogEntryType::TxReceived)
+		.expect("the receiving half is logged");
+	api1.cancel_tx(mask1, Some(received.id), None)?;
+
+	slate = api1.finalize_tx(mask1, &slate)?;
+	api1.post_tx(mask1, &slate, false)?;
+	let _ = test_framework::award_blocks_to_wallet(&chain, wallet1.clone(), mask1, 5, false);
+
+	// Cancelling the send itself still removes the context.
+	let mut slate = api1.init_send_tx(
+		mask1,
+		InitTxArgs {
+			amount: reward,
+			minimum_confirmations: 2,
+			max_outputs: 500,
+			num_change_outputs: 1,
+			selection_strategy_is_use_all: false,
+			..Default::default()
+		},
+	)?;
+	api1.tx_lock_outputs(mask1, &slate)?;
+	wallet::controller::foreign_single_use(
+		wallet1.clone(),
+		PathBuf::from(test_dir),
+		mask1_i.clone(),
+		|api| {
+			slate = api.receive_tx(&slate, None, None)?;
+			Ok(())
+		},
+	)?;
+	let (_, txs) = api1.retrieve_txs(mask1, false, None, Some(slate.id), None)?;
+	let sent = txs
+		.iter()
+		.find(|t| t.tx_type == TxLogEntryType::TxSent)
+		.expect("the sending half is logged");
+	api1.cancel_tx(mask1, Some(sent.id), None)?;
+	assert!(api1.finalize_tx(mask1, &slate).is_err());
+
+	stopper.store(false, Ordering::Relaxed);
+	thread::sleep(Duration::from_millis(1000));
+	Ok(())
+}
+
+#[test]
+fn wallet_self_send_cancel_receive() {
+	let test_dir = "test_output/self_send_cancel_receive";
+	setup(test_dir);
+	if let Err(e) = self_send_cancel_receive_impl(test_dir) {
+		panic!("Libwallet Error: {}", e);
+	}
+	clean_output_dir(test_dir);
 }
