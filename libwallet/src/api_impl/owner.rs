@@ -904,6 +904,23 @@ where
 	tx::cancel_tx(w, keychain_mask, &parent_key_id, tx_id, tx_slate_id)
 }
 
+/// Cancel a transaction from the wallet's stored state, without asking the
+/// node first. For a caller that holds the wallet lock and has to release a
+/// transaction it locked a moment ago, where nothing can have confirmed.
+pub fn cancel_tx_stored<C, K>(
+	w: &mut WalletBackend<C, K>,
+	keychain_mask: Option<&SecretKey>,
+	tx_id: Option<u32>,
+	tx_slate_id: Option<Uuid>,
+) -> Result<(), Error>
+where
+	C: NodeClient,
+	K: Keychain,
+{
+	let parent_key_id = w.parent_key_id();
+	tx::cancel_tx(w, keychain_mask, &parent_key_id, tx_id, tx_slate_id)
+}
+
 /// get stored tx
 /// crashes if stored tx has total fees exceeding 2^40 nanogrin
 pub fn get_stored_tx<C, K>(

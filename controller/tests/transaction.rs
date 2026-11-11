@@ -800,6 +800,95 @@ fn db_wallet_tx_rollback() {
 	clean_output_dir(test_dir);
 }
 
+/// A send locked a moment ago is released from stored state alone.
+fn cancel_stored(test_dir: &'static str) -> Result<(), libwallet::Error> {
+	let mut wallet_proxy = create_wallet_proxy(test_dir);
+	let chain = wallet_proxy.chain.clone();
+	let stopper = wallet_proxy.running.clone();
+
+	create_wallet_and_add!(
+		client1,
+		wallet1,
+		mask1_i,
+		test_dir,
+		"wallet1",
+		None,
+		&mut wallet_proxy,
+		false,
+		api1
+	);
+	let mask1 = (&mask1_i).as_ref();
+	create_wallet_and_add!(
+		client2,
+		wallet2,
+		mask2_i,
+		test_dir,
+		"wallet2",
+		None,
+		&mut wallet_proxy,
+		false,
+		api2
+	);
+	let _ = (&client2, &wallet2, &mask2_i, &api2);
+
+	thread::spawn(move || {
+		if let Err(e) = wallet_proxy.run() {
+			error!("Wallet Proxy error: {}", e);
+		}
+	});
+
+	let _ = test_framework::award_blocks_to_wallet(&chain, wallet1.clone(), mask1, 5, false);
+	let (_, before) = api1.retrieve_summary_info(mask1, true, 1)?;
+	assert!(before.amount_currently_spendable > 0);
+
+	let args = InitTxArgs {
+		src_acct_name: None,
+		amount: 30_000_000_000,
+		minimum_confirmations: 2,
+		max_outputs: 500,
+		num_change_outputs: 1,
+		selection_strategy_is_use_all: true,
+		..Default::default()
+	};
+	let slate_i = api1.init_send_tx(mask1, args)?;
+	let slate = client1.send_tx_slate_direct("wallet2", &slate_i)?;
+	api1.tx_lock_outputs(mask1, &slate)?;
+	let (_, locked) = api1.retrieve_summary_info(mask1, false, 1)?;
+	assert!(locked.amount_locked > 0);
+
+	// From here on the node is gone; the release must not need it.
+	stopper.store(false, Ordering::Relaxed);
+	thread::sleep(Duration::from_millis(200));
+	{
+		wallet_inst!(wallet1, w);
+		libwallet::api_impl::owner::cancel_tx_stored(&mut *w, mask1, None, Some(slate.id))?;
+	}
+
+	let (_, after) = api1.retrieve_summary_info(mask1, false, 1)?;
+	assert_eq!(after.amount_locked, 0);
+	assert_eq!(
+		after.amount_currently_spendable,
+		before.amount_currently_spendable
+	);
+	let (_, txs) = api1.retrieve_txs(mask1, false, None, Some(slate.id), None)?;
+	assert_eq!(txs.len(), 1);
+	assert_eq!(txs[0].tx_type, libwallet::TxLogEntryType::TxSentCancelled);
+	// The signing context went with it.
+	assert!(api1.finalize_tx(mask1, &slate).is_err());
+
+	Ok(())
+}
+
+#[test]
+fn db_wallet_cancel_stored() {
+	let test_dir = "test_output/cancel_stored";
+	setup(test_dir);
+	if let Err(e) = cancel_stored(test_dir) {
+		panic!("Libwallet Error: {}", e);
+	}
+	clean_output_dir(test_dir);
+}
+
 #[test]
 fn db_wallet_big_amount_error() {
 	let test_dir = "test_output/big_amount_error";
