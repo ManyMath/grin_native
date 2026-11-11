@@ -183,6 +183,34 @@ where
 			// Transaction was late locked, select inputs+change now
 			// and insert into original context
 
+			// Locking records the payment proof from the returned slate,
+			// so that slate has to carry the one the send asked for.
+			match (&args.payment_proof_recipient_address, &sl.payment_proof) {
+				(None, None) => {}
+				(Some(a), Some(p)) if p.receiver_address == a.pub_key => {
+					if p.receiver_signature.is_none() {
+						return Err(Error::PaymentProof(
+							"Recipient did not provide requested proof signature".to_owned(),
+						));
+					}
+				}
+				(None, Some(_)) => {
+					return Err(Error::PaymentProof(
+						"The returned slate has a payment proof that was not requested".to_owned(),
+					));
+				}
+				(Some(_), None) => {
+					return Err(Error::PaymentProof(
+						"The returned slate is missing the requested payment proof".to_owned(),
+					));
+				}
+				(Some(_), Some(_)) => {
+					return Err(Error::PaymentProof(
+						"The returned slate's payment proof is for another address".to_owned(),
+					));
+				}
+			}
+
 			let current_height = w.w2n_client().get_chain_tip()?.0;
 			let mut temp_sl =
 				tx::new_tx_slate(w, context.amount, false, 2, false, args.ttl_blocks)?;

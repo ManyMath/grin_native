@@ -18,8 +18,9 @@ extern crate grin_wallet_controller as wallet;
 extern crate grin_wallet_impls as impls;
 extern crate grin_wallet_libwallet as libwallet;
 
-use self::libwallet::InitTxArgs;
+use self::libwallet::{InitTxArgs, Slate, SlatepackAddress};
 use impls::test_framework::{self, LocalWalletClient};
+use std::convert::TryFrom;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
@@ -160,6 +161,126 @@ fn late_lock_test_impl(test_dir: &'static str) -> Result<(), libwallet::Error> {
 	stopper.store(false, Ordering::Relaxed);
 	thread::sleep(Duration::from_millis(200));
 	Ok(())
+}
+
+/// A late-locked send only finalizes with the payment proof it asked for.
+fn late_lock_proof_impl(test_dir: &'static str) -> Result<(), libwallet::Error> {
+	let mut wallet_proxy = create_wallet_proxy(test_dir);
+	let chain = wallet_proxy.chain.clone();
+	let stopper = wallet_proxy.running.clone();
+
+	create_wallet_and_add!(
+		client1,
+		wallet1,
+		mask1_i,
+		test_dir,
+		"wallet1",
+		None,
+		&mut wallet_proxy,
+		false,
+		api1
+	);
+	let mask1 = (&mask1_i).as_ref();
+	create_wallet_and_add!(
+		client2,
+		wallet2,
+		mask2_i,
+		test_dir,
+		"wallet2",
+		None,
+		&mut wallet_proxy,
+		false,
+		api2
+	);
+	let mask2 = (&mask2_i).as_ref();
+	let _ = &client2;
+
+	thread::spawn(move || {
+		if let Err(e) = wallet_proxy.run() {
+			error!("Wallet Proxy error: {}", e);
+		}
+	});
+
+	test_framework::award_blocks_to_wallet(&chain, wallet1.clone(), mask1, 10, false)?;
+	let (_, before) = api1.retrieve_summary_info(mask1, true, 1)?;
+
+	let address2 = api2.get_slatepack_address(mask2, 0)?;
+	let other = SlatepackAddress::try_from(
+		"tgrin1xtxavwfgs48ckf3gk8wwgcndmn0nt4tvkl8a7ltyejjcy2mc6nfs9gm2lp",
+	)?;
+	let args = |proof: Option<SlatepackAddress>| InitTxArgs {
+		amount: 100_000_000_000,
+		minimum_confirmations: 2,
+		max_outputs: 500,
+		num_change_outputs: 1,
+		selection_strategy_is_use_all: false,
+		late_lock: Some(true),
+		payment_proof_recipient_address: proof,
+		..Default::default()
+	};
+	let untouched = |slate: &Slate| -> Result<(), libwallet::Error> {
+		let (_, info) = api1.retrieve_summary_info(mask1, false, 1)?;
+		assert_eq!(info.amount_locked, 0);
+		assert_eq!(
+			info.amount_currently_spendable,
+			before.amount_currently_spendable
+		);
+		let (_, txs) = api1.retrieve_txs(mask1, false, None, Some(slate.id), None)?;
+		assert!(txs.is_empty());
+		Ok(())
+	};
+
+	// The answer proves payment to a key other than the one asked for.
+	let mut s1 = api1.init_send_tx(mask1, args(Some(other.clone())))?;
+	s1.payment_proof.as_mut().unwrap().receiver_address = address2.pub_key;
+	let s2 = client1.send_tx_slate_direct("wallet2", &s1)?;
+	assert!(s2
+		.payment_proof
+		.as_ref()
+		.unwrap()
+		.receiver_signature
+		.is_some());
+	assert!(api1.finalize_tx(mask1, &s2).is_err());
+	untouched(&s2)?;
+
+	// The answer carries no proof at all.
+	let mut s1 = api1.init_send_tx(mask1, args(Some(address2.clone())))?;
+	s1.payment_proof = None;
+	let s2 = client1.send_tx_slate_direct("wallet2", &s1)?;
+	assert!(api1.finalize_tx(mask1, &s2).is_err());
+	untouched(&s2)?;
+
+	// The answer carries a proof nobody asked for.
+	let asked = api1.init_send_tx(mask1, args(Some(address2.clone())))?;
+	let mut s1 = api1.init_send_tx(mask1, args(None))?;
+	s1.payment_proof = asked.payment_proof.clone();
+	let s2 = client1.send_tx_slate_direct("wallet2", &s1)?;
+	assert!(api1.finalize_tx(mask1, &s2).is_err());
+	untouched(&s2)?;
+
+	// The proof asked for still finalizes.
+	let s1 = api1.init_send_tx(mask1, args(Some(address2.clone())))?;
+	let s2 = client1.send_tx_slate_direct("wallet2", &s1)?;
+	let s3 = api1.finalize_tx(mask1, &s2)?;
+	let (_, txs) = api1.retrieve_txs(mask1, false, None, Some(s3.id), None)?;
+	assert_eq!(
+		txs[0].payment_proof.as_ref().unwrap().receiver_address,
+		address2.pub_key
+	);
+
+	stopper.store(false, Ordering::Relaxed);
+	thread::sleep(Duration::from_millis(200));
+	Ok(())
+}
+
+#[test]
+fn late_lock_payment_proof() {
+	let test_dir = "test_output/late_lock_proof";
+	setup(test_dir);
+	if let Err(e) = late_lock_proof_impl(test_dir) {
+		panic!("Libwallet Error: {}", e);
+	}
+	clean_output_dir(test_dir);
 }
 
 #[test]
