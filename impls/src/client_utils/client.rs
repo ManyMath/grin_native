@@ -136,6 +136,11 @@ impl Client {
 			let proxy = Proxy::all(&format!("{}{}:{}", scheme, addr.ip(), addr.port()))
 				.map_err(|e| Error::Internal(format!("Unable to create proxy: {}", e)))?;
 			builder = builder.proxy(proxy);
+		} else {
+			// Without this reqwest uses the proxy the environment or the
+			// operating system names, which the wallet's settings never
+			// asked for.
+			builder = builder.no_proxy();
 		}
 
 		let client = builder
@@ -395,6 +400,33 @@ mod tests {
 			);
 			server.await.unwrap();
 		}
+	}
+
+	/// A client built without a proxy must not pick one up from the
+	/// environment.
+	#[tokio::test]
+	async fn no_proxy_means_a_direct_connection() {
+		// Nothing listens on the discard port here, so a request routed
+		// through this proxy fails.
+		std::env::set_var("HTTP_PROXY", "http://127.0.0.1:9");
+		std::env::set_var("http_proxy", "http://127.0.0.1:9");
+		std::env::set_var("ALL_PROXY", "http://127.0.0.1:9");
+		let client = Client::new(Duration::from_secs(5));
+		std::env::remove_var("HTTP_PROXY");
+		std::env::remove_var("http_proxy");
+		std::env::remove_var("ALL_PROXY");
+		let url = serve_once(
+			"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_string(),
+			0,
+		)
+		.await;
+		assert_eq!(
+			client
+				.unwrap()
+				._get_async::<serde_json::Value>(&url, None)
+				.await,
+			Ok(serde_json::json!({}))
+		);
 	}
 
 	/// Serves one response made of `head` followed by `body_len` spaces.
