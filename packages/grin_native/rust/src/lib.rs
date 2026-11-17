@@ -1,8 +1,8 @@
-//! C ABI over grin-wallet. See docs/architecture.md section 4.
+//! C ABI over grin-wallet.
 //!
 //! There is no process-wide chain type: every entry point sets the calling
 //! thread's chain type from its `network` argument, its config, or the
-//! session it looks up (section 4.2).
+//! session it looks up.
 
 // The entry points that take raw pointers are `unsafe`. Their safety
 // contracts are plain comments above each function, because cbindgen copies

@@ -1,7 +1,7 @@
 name: grin
 description: The backend-neutral Grin wallet API. Wallet and backend interfaces, models, exceptions, units and events, in pure Dart. Apps depend on a backend package such as grin_native, which re-exports this one.
 version: 0.1.0
-repository: https://git.cypherstack.com/sneurlax/grin_native
+repository: https://github.com/cypherstack/grin
 # Not published. The maintainers decide when and where once the plugin has
 # been reviewed; never publish from a working tree.
 publish_to: none

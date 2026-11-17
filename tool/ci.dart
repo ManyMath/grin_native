@@ -1,4 +1,4 @@
-// Runs every gate of docs/architecture.md sections 7 and 8 in one command.
+// Runs the repository's format, analysis, test, and build gates.
 //
 //   dart run tool/ci.dart                 # everything that runs on this host
 //   dart run tool/ci.dart --list          # print the stages

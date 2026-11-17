@@ -3,8 +3,8 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:isolate';
 
-import 'package:grin/codec.dart';
-import 'package:grin/grin.dart';
+import 'package:grin_native/codec.dart';
+import 'package:grin_native/grin.dart';
 import 'package:meta/meta.dart';
 
 import '../ffi/bindings.g.dart' as bindings;

@@ -1,4 +1,4 @@
-//! In-process chain and wallets for tests (docs/architecture.md 7.1). Only
+//! In-process chain and wallets for tests. Only
 //! built with the `test-utils` feature; release artifacts must not export
 //! any `grin_test_*` symbol.
 //!

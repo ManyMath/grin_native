@@ -8,7 +8,7 @@
 //! released. `post_tx` must not hold it: the test chain mines a posted
 //! transaction at once and locks the posting wallet to pay it the coinbase.
 //!
-//! Sidecar writes are best effort (docs/architecture.md 4.4): a failure is
+//! Sidecar writes are best effort: a failure is
 //! logged and never fails the call.
 
 use std::collections::HashMap;

@@ -1,5 +1,5 @@
 //! Per-transaction metadata that `TxLogEntry` does not store, kept in
-//! `<wallet_dir>/wallet_data/tx_metadata.json` (docs/architecture.md 4.4).
+//! `<wallet_dir>/wallet_data/tx_metadata.json`.
 //!
 //! Callers treat every failure here as non-fatal: log it and carry on.
 

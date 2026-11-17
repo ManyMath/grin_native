@@ -1,5 +1,4 @@
-//! Session registry, `Drop`-based close and the per-directory LMDB guard
-//! (docs/architecture.md section 4.5).
+//! Session registry, `Drop`-based close and the per-directory LMDB guard.
 //!
 //! `OPEN_DIRS` is keyed by directory identity (`DirKey`), not by path, so a
 //! wallet database reached through a bind mount or through a directory

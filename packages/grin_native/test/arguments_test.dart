@@ -1,4 +1,4 @@
-import 'package:grin/codec.dart';
+import 'package:grin_native/codec.dart';
 import 'package:grin_native/grin_native.dart';
 import 'package:test/test.dart';
 

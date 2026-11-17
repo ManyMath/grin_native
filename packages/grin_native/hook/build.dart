@@ -13,8 +13,7 @@ import 'package:native_toolchain_rust/native_toolchain_rust.dart';
 /// the grin_test_* functions the Dart tests drive an in-process chain with.
 /// Never set it in an app.
 ///
-/// There is no prebuilt or reproducible path yet. Release artifacts are a
-/// later step (docs/architecture.md D11).
+/// The library is built from source for the requested target.
 Future<void> main(List<String> args) => build(args, (input, output) async {
   if (!input.config.buildCodeAssets) return;
 
@@ -64,8 +63,7 @@ Future<void> main(List<String> args) => build(args, (input, output) async {
     // semaphores on Apple targets by default, and the App Sandbox denies
     // them (EPERM from mdb_env_open). Keep the lock in lock.mdb with pthread
     // mutexes instead; Apple has no robust mutexes, so turn those off. The
-    // flags match flutter_libmwc's hook. Not yet verified on a device
-    // (docs/architecture.md section 13).
+    // flags match flutter_libmwc's hook.
     if (config.targetOS == OS.macOS || config.targetOS == OS.iOS)
       'CFLAGS_$variable': '-DMDB_USE_POSIX_MUTEX=1 -DMDB_USE_ROBUST=0',
   };

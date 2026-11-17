@@ -15,7 +15,7 @@ Map<String, Object?> decodeJsonObject(String? text) {
 /// Reads an unsigned integer amount (nanogrin) as a [BigInt].
 ///
 /// Accepts a JSON integer or a decimal string. grin_native writes every
-/// amount as a JSON integer of at most 2^63 - 1 (docs/ffi-json.md 1.4), so
+/// amount as a JSON integer of at most 2^63 - 1, so
 /// the VM's decoder always yields an [int]; the one string amount is in
 /// libwallet's payment proof format. A backend whose JSON decoder cannot
 /// hold 64-bit integers exactly (JavaScript holds 2^53) must write amounts

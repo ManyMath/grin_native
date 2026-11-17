@@ -4,8 +4,8 @@ import '../internal/json_helpers.dart';
 
 /// Base class of every error reported by the native Grin library.
 ///
-/// There is one subclass per error code in the grin-ffi contract
-/// (docs/ffi-json.md, section 2.2). The class is sealed, so a `switch` over
+/// There is one subclass per error code in the grin-ffi contract. The class
+/// is sealed, so a `switch` over
 /// a [GrinException] is checked for completeness. A code this version of the
 /// package does not know maps to [GrinUnknownException].
 sealed class GrinException implements Exception {

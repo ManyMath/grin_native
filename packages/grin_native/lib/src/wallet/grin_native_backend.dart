@@ -1,4 +1,4 @@
-import 'package:grin/grin.dart';
+import 'package:grin_native/grin.dart';
 
 import 'grin_wallet_client.dart';
 

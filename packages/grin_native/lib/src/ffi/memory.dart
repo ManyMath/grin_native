@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:ffi';
 
 import 'package:ffi/ffi.dart';
-import 'package:grin/grin.dart';
+import 'package:grin_native/grin.dart';
 import 'package:meta/meta.dart';
 
 import 'bindings.g.dart' as bindings;

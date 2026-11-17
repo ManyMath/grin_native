@@ -185,8 +185,7 @@ abstract interface class GrinWalletApi {
   ///
   /// Like every operation it runs in the queue, so it starts only after the
   /// operations before it. To apply it during a long scan, call [cancelScan]
-  /// first; the scan then stops at its next batch boundary. See section 8 of
-  /// docs/ffi-json.md.
+  /// first; the scan then stops at its next batch boundary.
   Future<void> updateNetwork({
     required String nodeUrl,
     required String? apiSecret,
@@ -434,7 +433,7 @@ abstract interface class GrinWalletApi {
   /// again tries step 5 again.
   ///
   /// Step 3 can still take up to one scan batch (10,001 blocks and their
-  /// node requests). See section 8 of docs/ffi-json.md.
+  /// node requests).
   ///
   /// When the returned future completes, the wallet directory is free to be
   /// opened again. The [events] stream is closed without waiting for its

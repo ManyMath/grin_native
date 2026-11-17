@@ -21,15 +21,15 @@ default = []
 test-utils = []
 
 [dependencies]
-grin_wallet_impls = { git = "ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git", rev = "ee6bc01333d822352a2ebabd07e11690a02e945f", default-features = false, features = ["rustls"] }
-grin_wallet_libwallet = { git = "ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git", rev = "ee6bc01333d822352a2ebabd07e11690a02e945f" }
-grin_wallet_config = { git = "ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git", rev = "ee6bc01333d822352a2ebabd07e11690a02e945f" }
-grin_wallet_util = { git = "ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git", rev = "ee6bc01333d822352a2ebabd07e11690a02e945f" }
-grin_core = { git = "ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git", rev = "ee6bc01333d822352a2ebabd07e11690a02e945f" }
-grin_keychain = { git = "ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git", rev = "ee6bc01333d822352a2ebabd07e11690a02e945f" }
-grin_chain = { git = "ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git", rev = "ee6bc01333d822352a2ebabd07e11690a02e945f" }
-grin_store = { git = "ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git", rev = "ee6bc01333d822352a2ebabd07e11690a02e945f" }
-grin_util = { git = "ssh://git@git.cypherstack.com:222/sneurlax/grin-wallet.git", rev = "ee6bc01333d822352a2ebabd07e11690a02e945f" }
+grin_wallet_impls = { git = "https://github.com/cypherstack/grin_native.git", rev = "f15ae2e3a3ae1a426a4ad45ecb1142a8ba295662", default-features = false, features = ["rustls"] }
+grin_wallet_libwallet = { git = "https://github.com/cypherstack/grin_native.git", rev = "f15ae2e3a3ae1a426a4ad45ecb1142a8ba295662" }
+grin_wallet_config = { git = "https://github.com/cypherstack/grin_native.git", rev = "f15ae2e3a3ae1a426a4ad45ecb1142a8ba295662" }
+grin_wallet_util = { git = "https://github.com/cypherstack/grin_native.git", rev = "f15ae2e3a3ae1a426a4ad45ecb1142a8ba295662" }
+grin_core = { git = "https://github.com/cypherstack/grin_native.git", rev = "f15ae2e3a3ae1a426a4ad45ecb1142a8ba295662" }
+grin_keychain = { git = "https://github.com/cypherstack/grin_native.git", rev = "f15ae2e3a3ae1a426a4ad45ecb1142a8ba295662" }
+grin_chain = { git = "https://github.com/cypherstack/grin_native.git", rev = "f15ae2e3a3ae1a426a4ad45ecb1142a8ba295662" }
+grin_store = { git = "https://github.com/cypherstack/grin_native.git", rev = "f15ae2e3a3ae1a426a4ad45ecb1142a8ba295662" }
+grin_util = { git = "https://github.com/cypherstack/grin_native.git", rev = "f15ae2e3a3ae1a426a4ad45ecb1142a8ba295662" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"

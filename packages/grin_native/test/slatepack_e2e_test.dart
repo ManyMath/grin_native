@@ -629,8 +629,8 @@ void main() {
 
   test('armored Slatepack lengths', () async {
     // One 60 grin coinbase input and one change output per send. The
-    // numbers go to stdout so docs/architecture.md section 13 can record
-    // them; the bounds only catch a large change.
+    // numbers go to stdout for inspection; the bounds only catch a large
+    // change.
     final w = await setUpWallets(blocks: 6);
     final amount = BigInt.from(10) * grin;
     final lengths = <String, int>{};

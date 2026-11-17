@@ -1,7 +1,7 @@
 import 'dart:isolate';
 
-import 'package:grin/codec.dart';
-import 'package:grin/grin.dart';
+import 'package:grin_native/codec.dart';
+import 'package:grin_native/grin.dart';
 
 import '../ffi/bindings.g.dart' as bindings;
 import '../ffi/memory.dart';
